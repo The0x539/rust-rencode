@@ -228,6 +228,10 @@ impl<'a, W: Write> ser::Serializer for &'a mut RencodeSerializer<W> {
         Ok(self)
     }
 
+    fn serialize_newtype_struct<T: ?Sized + Serialize>(self, _: &str, value: &T) -> Result<()> {
+        value.serialize(self)
+    }
+
     // Data types not supported by the real rencode
     fn serialize_char(self, _: char) -> Result<()> { unimplemented!() }
     fn serialize_u8(self, _: u8) -> Result<()> { unimplemented!() }
@@ -236,7 +240,6 @@ impl<'a, W: Write> ser::Serializer for &'a mut RencodeSerializer<W> {
     fn serialize_struct_variant(self, _: &str, _: u32, _: &str, _: usize) -> Nope { unimplemented!() }
     fn serialize_unit_struct(self, _: &str) -> Result<()> { unimplemented!() }
     fn serialize_unit_variant(self, _: &str, _: u32, _: &str) -> Result<()> { unimplemented!() }
-    fn serialize_newtype_struct<T: ?Sized + Serialize>(self, _: &str, _: &T) -> Result<()> { unimplemented!() }
     fn serialize_newtype_variant<T: ?Sized + Serialize>(self, _: &str, _: u32, _: &str, _: &T) -> Result<()> { unimplemented!() }
     fn serialize_tuple_struct(self, _: &str, _: usize) -> Nope { unimplemented!() }
     fn serialize_tuple_variant(self, _: &str, _: u32, _: &str, _: usize) -> Nope { unimplemented!() }

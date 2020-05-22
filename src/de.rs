@@ -54,7 +54,8 @@ impl<R: Read> RencodeDeserializer<R> {
     fn next_bytes(&mut self, x: u8) -> Result<Vec<u8>> {
         let len: usize = match x {
             n @ 49..=57 => {
-                let mut len_bytes = vec![n];
+                let mut len_bytes = Vec::with_capacity(usize::MAX.to_string().len());
+                len_bytes.push(n);
                 loop {
                     match self.next_byte()? {
                         // Accept '0' as subsequent digits, but not as the intial digit.
@@ -65,9 +66,10 @@ impl<R: Read> RencodeDeserializer<R> {
                 }
                 // Okay to unwrap because we know the only thing we put in there was ascii decimal digits
                 let len_str = std::str::from_utf8(&len_bytes).unwrap();
-                // Okay to unwrap because we know it's a decimal, and it's probably reasonably sized.
-                // TODO: return Err when it's unreasonably large.
-                len_str.parse().unwrap()
+                match len_str.parse() {
+                    Ok(len) => len,
+                    Err(e) => return Err(Error::custom(e)),
+                }
             },
             n @ STR_START..=STR_END => (n - STR_START) as usize,
             // Okay to panic because this is a private function in a private struct.

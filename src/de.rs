@@ -12,7 +12,7 @@ struct RencodeDeserializer<R: Read> {
 pub fn from_reader<'de, T: Deserialize<'de>>(data: impl Read) -> Result<T> {
     let mut deserializer = RencodeDeserializer { data: data, returned_byte: None };
     let val = T::deserialize(&mut deserializer)?;
-    if deserializer.read(&mut [0u8])? == 0 {
+    if deserializer.read(&mut [0u8])? > 0 {
         return Err(Error::custom("too many bytes"))
     }
     Ok(val)
@@ -24,14 +24,13 @@ pub fn from_bytes<'de, T: Deserialize<'de>>(data: &'de [u8]) -> Result<T> {
 
 impl<R: Read> Read for RencodeDeserializer<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if buf.len() == 0 { return Ok(0); }
-
-        match self.returned_byte.take() {
-            Some(x) => {
-                buf[0] = x;
-                self.data.read(&mut buf[1..])
-            },
-            None => self.data.read(buf),
+        if buf.len() == 0 {
+            Ok(0)
+        } else if let Some(x) = self.returned_byte.take() {
+            buf[0] = x;
+            Ok(1)
+        } else {
+            self.data.read(buf)
         }
     }
 }

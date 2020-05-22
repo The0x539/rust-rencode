@@ -1,78 +1,235 @@
 use std::io::Read;
 use byteorder::{ReadBytesExt, BE};
-use serde::{de, Deserialize, de::DeserializeOwned};
+use serde::de::{self, Error as _, Deserializer, Deserialize, Visitor};
 
 use crate::types::*;
 
-struct RencodeDeserializer<'de> { data: &'de [u8] }
+struct RencodeDeserializer<'de, R> {
+    data: R,
+    returned_byte: Option<u8>,
+    // TODO: try and get rid of this nightmare thing
+    whatever: std::marker::PhantomData<&'de ()>,
+}
 
-pub fn from_bytes<'a, T: Deserialize<'a>>(data: &'a [u8]) -> Result<T> {
-    let mut deserializer = RencodeDeserializer { data };
+pub fn from_reader<'de, T: Deserialize<'de>, R: Read>(data: R) -> Result<T> {
+    let mut deserializer = RencodeDeserializer { data: data, returned_byte: None, whatever: Default::default() };
     let val = T::deserialize(&mut deserializer)?;
-    if deserializer.data.len() == 0 {
-        Ok(val)
-    } else {
-        Err(de::Error::custom("too many bytes"))
+    if deserializer.read(&mut [0u8])? == 0 {
+        return Err(Error::custom("too many bytes"))
+    }
+    Ok(val)
+}
+
+pub fn from_bytes<'de, T: Deserialize<'de>>(data: &'de [u8]) -> Result<T> {
+    from_reader(data)
+}
+
+impl<'de, R: Read> Read for RencodeDeserializer<'de, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.len() == 0 { return Ok(0); }
+
+        match self.returned_byte.take() {
+            Some(x) => {
+                buf[0] = x;
+                self.data.read(&mut buf[1..])
+            },
+            None => self.data.read(buf),
+        }
     }
 }
 
-pub fn from_reader<T: DeserializeOwned>(data: impl Read) -> Result<T> {
-    // TODO: not this
-    from_bytes(data.bytes().collect::<std::io::Result<Vec<u8>>>().unwrap().as_slice())
+impl<'de, R: Read> RencodeDeserializer<'de, R> {
+    fn next_byte(&mut self) -> Result<u8> {
+        let mut buf = [0u8];
+        self.read_exact(&mut buf)?;
+        Ok(buf[0])
+    }
+
+    fn go_back<T>(&mut self, n: u8) -> Option<T> {
+        match self.returned_byte.replace(n) {
+            None => (),
+            Some(_) => unreachable!("we should never take more than 2 steps back"),
+        }
+        None
+    }
+
+    fn next_unit(&mut self) -> Result<Option<()>> {
+        let x = match self.next_byte()? {
+            types::NONE => Some(()),
+            n => self.go_back(n),
+        }; Ok(x)
+    }
+
+    fn next_bool(&mut self) -> Result<Option<bool>> {
+        let x = match self.next_byte()? {
+            types::TRUE => Some(true),
+            types::FALSE => Some(false),
+            n => self.go_back(n),
+        }; Ok(x)
+    }
+
+    fn next_i8(&mut self) -> Result<Option<i8>> {
+        let x = match self.next_byte()? {
+            types::INT1 => Some(self.read_i8()?),
+            n @ 0..=43 => Some(INT_POS_START + n as i8),
+            n @ 70..=101 => Some(70 - 1 - n as i8),
+            n => self.go_back(n),
+        }; Ok(x)
+    }
+
+    fn next_i16(&mut self) -> Result<Option<i16>> {
+        let x = match self.next_byte()? {
+            types::INT2 => Some(self.read_i16::<BE>()?),
+            n => self.go_back(n),
+        }; Ok(x)
+    }
+
+    fn next_i32(&mut self) -> Result<Option<i32>> {
+        let x = match self.next_byte()? {
+            types::INT4 => Some(self.read_i32::<BE>()?),
+            n => self.go_back(n),
+        }; Ok(x)
+    }
+
+    fn next_i64(&mut self) -> Result<Option<i64>> {
+        let x = match self.next_byte()? {
+            types::INT8 => Some(self.read_i64::<BE>()?),
+            n => self.go_back(n),
+        }; Ok(x)
+    }
+
+    fn next_f32(&mut self) -> Result<Option<f32>> {
+        let x = match self.next_byte()? {
+            types::FLOAT32 => Some(self.read_f32::<BE>()?),
+            n => self.go_back(n),
+        }; Ok(x)
+    }
+
+    fn next_f64(&mut self) -> Result<Option<f64>> {
+        let x = match self.next_byte()? {
+            types::FLOAT64 => Some(self.read_f64::<BE>()?),
+            n => self.go_back(n),
+        }; Ok(x)
+    }
+
+    fn next_bytes(&mut self) -> Result<Option<Vec<u8>>> {
+        let x = match self.next_byte()? {
+            n @ 49..=57 => {
+                let mut len_bytes = vec![n];
+                loop {
+                    match self.next_byte()? {
+                        n @ 48..=57 => len_bytes.push(n),
+                        58 => break,
+                        n => return Err(Error::custom(format!("Unexpected byte while parsing string length: {}", n))),
+                    }
+                }
+                // Okay to unwrap because we know the only thing we put in there was ascii decimal digits
+                let len_str = std::str::from_utf8(&len_bytes).unwrap();
+                // Okay to unwrap because we know it's a decimal, and it's probably reasonably sized.
+                // TODO: return Err when it's unreasonably large.
+                let len: usize = len_str.parse().unwrap();
+                let mut buf = Vec::with_capacity(len);
+                self.read_exact(&mut buf)?;
+                Some(buf)
+            },
+            n @ STR_START..=STR_END => {
+                let len = (n - STR_START) as usize;
+                let mut buf = Vec::with_capacity(len);
+                self.read_exact(&mut buf)?;
+                Some(buf)
+            },
+            n => self.go_back(n),
+        }; Ok(x)
+    }
+
+    fn next_fixed_seq(&mut self) -> Result<Option<usize>> {
+        let x = match self.next_byte()? {
+            n @ LIST_START..=LIST_END => Some((n - LIST_START) as usize),
+            n => self.go_back(n),
+        }; Ok(x)
+    }
+
+    fn next_fixed_map(&mut self) -> Result<Option<usize>> {
+        let x = match self.next_byte()? {
+            n @ DICT_START..=DICT_END => Some((n - LIST_START) as usize),
+            n => self.go_back(n),
+        }; Ok(x)
+    }
+
+    fn next_terminated_seq(&mut self) -> Result<Option<()>> {
+        let x = match self.next_byte()? {
+            types::LIST => Some(()),
+            n => self.go_back(n),
+        }; Ok(x)
+    }
+
+    fn next_terminated_map(&mut self) -> Result<Option<()>> {
+        let x = match self.next_byte()? {
+            types::DICT => Some(()),
+            n => self.go_back(n),
+        }; Ok(x)
+    }
 }
 
-impl<'de> RencodeDeserializer<'de> {
-    fn advance(&mut self, n: usize) {
-        self.data = &self.data[n..];
+impl<'de, 'a, R: Read> Deserializer<'de> for &'a mut RencodeDeserializer<'de, R> {
+    type Error = Error;
+
+    fn deserialize_any<V: Visitor<'de>>(mut self, v: V) -> Result<V::Value> {
+        if let Some(()) = self.next_unit()? {
+            v.visit_unit()
+        } else if let Some(x) = self.next_bool()? {
+            v.visit_bool(x)
+        } else if let Some(x) = self.next_i8()? {
+            v.visit_i8(x)
+        } else if let Some(x) = self.next_i16()? {
+            v.visit_i16(x)
+        } else if let Some(x) = self.next_i32()? {
+            v.visit_i32(x)
+        } else if let Some(x) = self.next_i64()? {
+            v.visit_i64(x)
+        } else if let Some(x) = self.next_f32()? {
+            v.visit_f32(x)
+        } else if let Some(x) = self.next_f64()? {
+            v.visit_f64(x)
+        } else if let Some(x) = self.next_bytes()? {
+            match std::str::from_utf8(&x) {
+                Ok(s) => v.visit_string(s.to_string()),
+                Err(_) => v.visit_byte_buf(x),
+            }
+        } else if let Some(x) = self.next_fixed_seq()? {
+            v.visit_seq(FixedSeq(&mut self, x))
+        } else if let Some(x) = self.next_fixed_map()? {
+            v.visit_map(FixedMap(&mut self, x, false))
+        } else if let Some(()) = self.next_terminated_seq()? {
+            v.visit_seq(TerminatedSeq(&mut self))
+        } else if let Some(()) = self.next_terminated_map()? {
+            v.visit_map(TerminatedMap(&mut self, false))
+        } else {
+            let e = match self.next_byte()? {
+                types::INT => Error::custom("deserialization of bigints is unsupported at the time of writing"),
+                58 => Error::custom("unexpected strlen terminator"),
+                types::TERM => Error::custom("unexpected seq/map terminator"),
+                n @ 45..=48 => Error::custom(format!("unexpected unknown type indicator: {}", n)),
+                n => unreachable!("unexpectedly unhandled type indicator: {}", n),
+            };
+            Err(Error::custom(e))
+        }
     }
 
-    fn peek_byte(&self) -> u8 {
-        self.data[0]
+    fn deserialize_option<V: Visitor<'de>>(self, _v: V) -> Result<V::Value> {
+        todo!("gotta impl this...")
     }
 
-    fn next_byte(&mut self) -> u8 {
-        let val = self.peek_byte();
-        self.advance(1);
-        val
-    }
-
-    fn peek_slice(&self, n: usize) -> &'de [u8] {
-        &self.data[..n]
-    }
-
-    fn next_slice(&mut self, n: usize) -> &'de [u8] {
-        let val = self.peek_slice(n);
-        self.advance(n);
-        val
-    }
-
-    fn next_i8(&mut self) -> i8 { self.next_slice(1).read_i8().unwrap() }
-    fn next_i16(&mut self) -> i16 { self.next_slice(2).read_i16::<BE>().unwrap() }
-    fn next_i32(&mut self) -> i32 { self.next_slice(4).read_i32::<BE>().unwrap() }
-    fn next_i64(&mut self) -> i64 { self.next_slice(8).read_i64::<BE>().unwrap() }
-
-    fn next_f32(&mut self) -> f32 { self.next_slice(4).read_f32::<BE>().unwrap() }
-    fn next_f64(&mut self) -> f64 { self.next_slice(8).read_f64::<BE>().unwrap() }
-
-    fn next_str_fixed(&mut self, len: usize) -> &'de str {
-        std::str::from_utf8(self.next_slice(len)).unwrap()
-    }
-
-    fn next_str_terminated(&mut self, first_byte: u8) -> &'de str {
-        // this code assumes well-formed input
-        let mut splitn = self.data.splitn(2, |&x| x == 58);
-        let mut len_bytes: Vec<u8> = splitn.next().unwrap().to_vec();
-        len_bytes.insert(0, first_byte); // this is the only time we'd need to peek for deserialize_any
-        let len_str: &str = std::str::from_utf8(&len_bytes).unwrap();
-        self.advance(len_str.len()); // the missing first byte and the terminating ':' cancel each other out
-        let len: usize = len_str.parse().unwrap();
-        std::str::from_utf8(self.next_slice(len)).unwrap_or("some non-utf8 nonsense")
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+        bytes byte_buf unit unit_struct newtype_struct seq tuple
+        tuple_struct map struct enum identifier ignored_any
     }
 }
 
-struct FixedLengthSeq<'a, 'de: 'a>(&'a mut RencodeDeserializer<'de>, usize);
+struct FixedSeq<'a, 'de: 'a, R: Read>(&'a mut RencodeDeserializer<'de, R>, usize);
 
-impl<'de, 'a> de::SeqAccess<'de> for FixedLengthSeq<'a, 'de> {
+impl<'de, 'a, R: Read> de::SeqAccess<'de> for FixedSeq<'a, 'de, R> {
     type Error = Error;
 
     fn next_element_seed<T: de::DeserializeSeed<'de>>(&mut self, seed: T) -> Result<Option<T::Value>> {
@@ -84,9 +241,9 @@ impl<'de, 'a> de::SeqAccess<'de> for FixedLengthSeq<'a, 'de> {
     }
 }
 
-struct FixedLengthMap<'a, 'de: 'a>(&'a mut RencodeDeserializer<'de>, usize, bool);
+struct FixedMap<'a, 'de: 'a, R: Read>(&'a mut RencodeDeserializer<'de, R>, usize, bool);
 
-impl<'de, 'a> de::MapAccess<'de> for FixedLengthMap<'a, 'de> {
+impl<'de, 'a, R: Read> de::MapAccess<'de> for FixedMap<'a, 'de, R> {
     type Error = Error;
 
     fn next_key_seed<T: de::DeserializeSeed<'de>>(&mut self, seed: T) -> Result<Option<T::Value>> {
@@ -110,32 +267,32 @@ impl<'de, 'a> de::MapAccess<'de> for FixedLengthMap<'a, 'de> {
     }
 }
 
-struct TerminatedSeq<'a, 'de: 'a>(&'a mut RencodeDeserializer<'de>);
+struct TerminatedSeq<'a, 'de: 'a, R: Read>(&'a mut RencodeDeserializer<'de, R>);
 
-impl<'de, 'a> de::SeqAccess<'de> for TerminatedSeq<'a, 'de> {
+impl<'a, 'de: 'a, R: Read> de::SeqAccess<'de> for TerminatedSeq<'a, 'de, R> {
     type Error = Error;
 
     fn next_element_seed<T: de::DeserializeSeed<'de>>(&mut self, seed: T) -> Result<Option<T::Value>> {
-        if self.0.peek_byte() == types::TERM {
-            self.0.advance(1);
-            return Ok(None);
+        match self.0.next_byte()? {
+            types::TERM => { return Ok(None); },
+            n => { self.0.go_back::<()>(n); },
         }
         seed.deserialize(&mut *self.0).map(Some)
     }
 }
 
-struct TerminatedMap<'a, 'de: 'a>(&'a mut RencodeDeserializer<'de>, bool);
+struct TerminatedMap<'a, 'de: 'a, R: Read>(&'a mut RencodeDeserializer<'de, R>, bool);
 
-impl<'de, 'a> de::MapAccess<'de> for TerminatedMap<'a, 'de> {
+impl<'a, 'de: 'a, R: Read> de::MapAccess<'de> for TerminatedMap<'a, 'de, R> {
     type Error = Error;
 
     fn next_key_seed<T: de::DeserializeSeed<'de>>(&mut self, seed: T) -> Result<Option<T::Value>> {
         if self.1 {
             panic!("tried to get a key inappropriately");
         }
-        if self.0.peek_byte() == types::TERM {
-            self.0.advance(1);
-            return Ok(None);
+        match self.0.next_byte()? {
+            types::TERM => { return Ok(None); },
+            n => { self.0.go_back::<()>(n); },
         }
         self.1 = true;
         seed.deserialize(&mut *self.0).map(Some)
@@ -147,48 +304,5 @@ impl<'de, 'a> de::MapAccess<'de> for TerminatedMap<'a, 'de> {
         }
         self.1 = false;
         seed.deserialize(&mut *self.0)
-    }
-}
-
-impl<'de, 'a> de::Deserializer<'de> for &'a mut RencodeDeserializer<'de> {
-    type Error = Error;
-
-    fn deserialize_any<V: de::Visitor<'de>>(self, visitor: V) -> Result<V::Value> {
-        match self.next_byte() {
-            types::NONE => visitor.visit_unit(),
-            types::TRUE => visitor.visit_bool(true),
-            types::FALSE => visitor.visit_bool(false),
-            types::INT1 => visitor.visit_i8(self.next_i8()),
-            types::INT2 => visitor.visit_i16(self.next_i16()),
-            types::INT4 => visitor.visit_i32(self.next_i32()),
-            types::INT8 => visitor.visit_i64(self.next_i64()),
-            types::INT => unimplemented!(),
-            
-            types::FLOAT32 => visitor.visit_f32(self.next_f32()),
-            types::FLOAT64 => visitor.visit_f64(self.next_f64()),
-
-            x @ 0..=43 => visitor.visit_i8(INT_POS_START + x as i8),
-            x @ 70..=101 => visitor.visit_i8(70 - 1 - x as i8),
-
-            x @ STR_START..=STR_END => visitor.visit_borrowed_str(self.next_str_fixed((x - STR_START) as usize)),
-            x @ 49..=57 => visitor.visit_borrowed_str(self.next_str_terminated(x)),
-            58 => Err(de::Error::custom("unexpected strlen terminator")),
-
-            x @ LIST_START..=LIST_END => visitor.visit_seq(FixedLengthSeq(self, (x - LIST_START) as usize)),
-            types::LIST => visitor.visit_seq(TerminatedSeq(self)),
-
-            x @ DICT_START..=DICT_END => visitor.visit_map(FixedLengthMap(self, (x - DICT_START) as usize, false)),
-            types::DICT => visitor.visit_map(TerminatedMap(self, false)),
-
-            types::TERM => Err(de::Error::custom("unexpected list/dict terminator")),
-
-            45..=48 => Err(de::Error::custom("I don't know what values 45-48 are supposed to mean")),
-        }
-    }
-
-    serde::forward_to_deserialize_any! {
-        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
-        bytes byte_buf option unit unit_struct newtype_struct seq tuple
-        tuple_struct map struct enum identifier ignored_any
     }
 }

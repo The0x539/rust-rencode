@@ -1,6 +1,6 @@
 use std::io::Write;
 use byteorder::{WriteBytesExt, BE};
-use serde::{ser, Serialize};
+use serde::{ser, ser::Error as _, Serialize};
 
 use crate::types::*;
 
@@ -21,7 +21,7 @@ impl<W: Write> RencodeSerializer<W> {
 pub fn to_writer(writer: &mut impl Write, value: &impl Serialize) -> Result<()> {
     let mut serializer = RencodeSerializer(writer, vec![]);
     value.serialize(&mut serializer)?;
-    serializer.0.flush().map_err(|e| ser::Error::custom(e))
+    serializer.0.flush().map_err(|e| Error::custom(e))
 }
 
 pub fn to_bytes(value: &impl Serialize) -> Result<Vec<u8>> {
@@ -160,7 +160,7 @@ impl<'a, W: Write> ser::Serializer for &'a mut RencodeSerializer<W> {
 
     fn serialize_u64(self, v: u64) -> Result<()> {
         if v > std::i64::MAX as u64 {
-            return Err(ser::Error::custom("unsigned integers are unsupported"));
+            return Err(Error::custom("unsigned integers are unsupported"));
         }
         self.serialize_i64(v as i64)
     }
@@ -193,7 +193,7 @@ impl<'a, W: Write> ser::Serializer for &'a mut RencodeSerializer<W> {
     }
 
     fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq> {
-        self.serialize_tuple(len.ok_or(ser::Error::custom("try .collect()"))?)
+        self.serialize_tuple(len.ok_or(Error::custom("try .collect()"))?)
     }
 
     fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple> {
@@ -207,7 +207,7 @@ impl<'a, W: Write> ser::Serializer for &'a mut RencodeSerializer<W> {
     }
 
     fn serialize_map(self, len: Option<usize>) -> Result<Self::SerializeMap> {
-        let len = len.ok_or(ser::Error::custom("need to know map size ahead of time"))?;
+        let len = len.ok_or(Error::custom("need to know map size ahead of time"))?;
         if len < DICT_COUNT {
             self.write_u8(DICT_START + len as u8);
         } else {

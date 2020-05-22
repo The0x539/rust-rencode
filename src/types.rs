@@ -33,6 +33,7 @@ pub const DICT_START: u8 = 102;
 pub const DICT_COUNT: usize = 25;
 pub const DICT_END: u8 = DICT_START - 1 + DICT_COUNT as u8;
 
+// TODO: more meaningful information contents
 #[derive(Debug)]
 pub struct Error(String);
 impl std::fmt::Display for Error {
@@ -40,7 +41,15 @@ impl std::fmt::Display for Error {
         f.write_str(self.0.as_str())
     }
 }
+
 impl std::error::Error for Error {}
+
+impl std::convert::From<std::io::Error> for Error {
+    fn from(value: std::io::Error) -> Self {
+        Self(format!("{:?}", value))
+    }
+}
+
 impl serde::de::Error for Error {
     fn custom<T: std::fmt::Display>(msg: T) -> Self {
         Self(msg.to_string())

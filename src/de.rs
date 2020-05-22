@@ -4,15 +4,13 @@ use serde::de::{self, Error as _, Deserializer, Deserialize, Visitor};
 
 use crate::types::*;
 
-struct RencodeDeserializer<'de, R> {
+struct RencodeDeserializer<R: Read> {
     data: R,
     returned_byte: Option<u8>,
-    // TODO: try and get rid of this nightmare thing
-    whatever: std::marker::PhantomData<&'de ()>,
 }
 
-pub fn from_reader<'de, T: Deserialize<'de>, R: Read>(data: R) -> Result<T> {
-    let mut deserializer = RencodeDeserializer { data: data, returned_byte: None, whatever: Default::default() };
+pub fn from_reader<'de, T: Deserialize<'de>>(data: impl Read) -> Result<T> {
+    let mut deserializer = RencodeDeserializer { data: data, returned_byte: None };
     let val = T::deserialize(&mut deserializer)?;
     if deserializer.read(&mut [0u8])? == 0 {
         return Err(Error::custom("too many bytes"))
@@ -24,7 +22,7 @@ pub fn from_bytes<'de, T: Deserialize<'de>>(data: &'de [u8]) -> Result<T> {
     from_reader(data)
 }
 
-impl<'de, R: Read> Read for RencodeDeserializer<'de, R> {
+impl<R: Read> Read for RencodeDeserializer<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if buf.len() == 0 { return Ok(0); }
 
@@ -38,7 +36,7 @@ impl<'de, R: Read> Read for RencodeDeserializer<'de, R> {
     }
 }
 
-impl<'de, R: Read> RencodeDeserializer<'de, R> {
+impl<R: Read> RencodeDeserializer<R> {
     fn next_byte(&mut self) -> Result<u8> {
         let mut buf = [0u8];
         self.read_exact(&mut buf)?;
@@ -171,7 +169,7 @@ impl<'de, R: Read> RencodeDeserializer<'de, R> {
     }
 }
 
-impl<'de, 'a, R: Read> Deserializer<'de> for &'a mut RencodeDeserializer<'de, R> {
+impl<'de, 'a, R: Read> Deserializer<'de> for &'a mut RencodeDeserializer<R> {
     type Error = Error;
 
     fn deserialize_any<V: Visitor<'de>>(mut self, v: V) -> Result<V::Value> {
@@ -227,9 +225,9 @@ impl<'de, 'a, R: Read> Deserializer<'de> for &'a mut RencodeDeserializer<'de, R>
     }
 }
 
-struct FixedSeq<'a, 'de: 'a, R: Read>(&'a mut RencodeDeserializer<'de, R>, usize);
+struct FixedSeq<'a, R: Read>(&'a mut RencodeDeserializer<R>, usize);
 
-impl<'de, 'a, R: Read> de::SeqAccess<'de> for FixedSeq<'a, 'de, R> {
+impl<'de, 'a, R: Read> de::SeqAccess<'de> for FixedSeq<'a, R> {
     type Error = Error;
 
     fn next_element_seed<T: de::DeserializeSeed<'de>>(&mut self, seed: T) -> Result<Option<T::Value>> {
@@ -241,9 +239,9 @@ impl<'de, 'a, R: Read> de::SeqAccess<'de> for FixedSeq<'a, 'de, R> {
     }
 }
 
-struct FixedMap<'a, 'de: 'a, R: Read>(&'a mut RencodeDeserializer<'de, R>, usize, bool);
+struct FixedMap<'a, R: Read>(&'a mut RencodeDeserializer<R>, usize, bool);
 
-impl<'de, 'a, R: Read> de::MapAccess<'de> for FixedMap<'a, 'de, R> {
+impl<'de, 'a, R: Read> de::MapAccess<'de> for FixedMap<'a, R> {
     type Error = Error;
 
     fn next_key_seed<T: de::DeserializeSeed<'de>>(&mut self, seed: T) -> Result<Option<T::Value>> {
@@ -267,9 +265,9 @@ impl<'de, 'a, R: Read> de::MapAccess<'de> for FixedMap<'a, 'de, R> {
     }
 }
 
-struct TerminatedSeq<'a, 'de: 'a, R: Read>(&'a mut RencodeDeserializer<'de, R>);
+struct TerminatedSeq<'a, R: Read>(&'a mut RencodeDeserializer<R>);
 
-impl<'a, 'de: 'a, R: Read> de::SeqAccess<'de> for TerminatedSeq<'a, 'de, R> {
+impl<'a, 'de: 'a, R: Read> de::SeqAccess<'de> for TerminatedSeq<'a, R> {
     type Error = Error;
 
     fn next_element_seed<T: de::DeserializeSeed<'de>>(&mut self, seed: T) -> Result<Option<T::Value>> {
@@ -281,9 +279,9 @@ impl<'a, 'de: 'a, R: Read> de::SeqAccess<'de> for TerminatedSeq<'a, 'de, R> {
     }
 }
 
-struct TerminatedMap<'a, 'de: 'a, R: Read>(&'a mut RencodeDeserializer<'de, R>, bool);
+struct TerminatedMap<'a, R: Read>(&'a mut RencodeDeserializer<R>, bool);
 
-impl<'a, 'de: 'a, R: Read> de::MapAccess<'de> for TerminatedMap<'a, 'de, R> {
+impl<'a, 'de: 'a, R: Read> de::MapAccess<'de> for TerminatedMap<'a, R> {
     type Error = Error;
 
     fn next_key_seed<T: de::DeserializeSeed<'de>>(&mut self, seed: T) -> Result<Option<T::Value>> {

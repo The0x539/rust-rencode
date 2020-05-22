@@ -1,10 +1,11 @@
 [package]
 name = "rencode"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["The0x539 <the0x539@gmail.com>"]
 edition = "2018"
 license = "GPL-3.0-only"
 description = "A serde-based implementation of [rencode](https://github.com/aresch/rencode)."
+repository = "https://github.com/The0x539/rust-rencode"
 
 [dependencies]
 serde = "1.0.110"

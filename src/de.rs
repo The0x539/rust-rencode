@@ -125,13 +125,13 @@ impl<R: Read> RencodeDeserializer<R> {
                 // Okay to unwrap because we know it's a decimal, and it's probably reasonably sized.
                 // TODO: return Err when it's unreasonably large.
                 let len: usize = len_str.parse().unwrap();
-                let mut buf = Vec::with_capacity(len);
+                let mut buf = vec![0u8; len];
                 self.read_exact(&mut buf)?;
                 Some(buf)
             },
             n @ STR_START..=STR_END => {
                 let len = (n - STR_START) as usize;
-                let mut buf = Vec::with_capacity(len);
+                let mut buf = vec![0u8; len];
                 self.read_exact(&mut buf)?;
                 Some(buf)
             },
@@ -148,7 +148,7 @@ impl<R: Read> RencodeDeserializer<R> {
 
     fn next_fixed_map(&mut self) -> Result<Option<usize>> {
         let x = match self.next_byte()? {
-            n @ DICT_START..=DICT_END => Some((n - LIST_START) as usize),
+            n @ DICT_START..=DICT_END => Some((n - DICT_START) as usize),
             n => self.go_back(n),
         }; Ok(x)
     }

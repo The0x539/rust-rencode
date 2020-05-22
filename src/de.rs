@@ -214,8 +214,12 @@ impl<'de, 'a, R: Read> Deserializer<'de> for &'a mut RencodeDeserializer<R> {
         }
     }
 
-    fn deserialize_option<V: Visitor<'de>>(self, _v: V) -> Result<V::Value> {
-        todo!("gotta impl this...")
+    fn deserialize_option<V: Visitor<'de>>(self, v: V) -> Result<V::Value> {
+        if let Some(()) = self.next_unit()? {
+            v.visit_none()
+        } else {
+            v.visit_some(self)
+        }
     }
 
     serde::forward_to_deserialize_any! {

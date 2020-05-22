@@ -1,6 +1,6 @@
 use std::io::Read;
 use byteorder::{ReadBytesExt, BE};
-use serde::de::{self, Error as _, Deserializer, Deserialize, Visitor};
+use serde::de::{Error as _, Deserializer, Deserialize, Visitor, DeserializeSeed, SeqAccess, MapAccess};
 
 use crate::types::*;
 
@@ -85,7 +85,7 @@ impl<R: Read> RencodeDeserializer<R> {
 impl<'de, 'a, R: Read> Deserializer<'de> for &'a mut RencodeDeserializer<R> {
     type Error = Error;
 
-    fn deserialize_any<V: de::Visitor<'de>>(self, v: V) -> Result<V::Value> {
+    fn deserialize_any<V: Visitor<'de>>(self, v: V) -> Result<V::Value> {
         match self.next_byte()? {
             types::NONE => v.visit_unit(),
             types::TRUE => v.visit_bool(true),
@@ -120,9 +120,9 @@ impl<'de, 'a, R: Read> Deserializer<'de> for &'a mut RencodeDeserializer<R> {
             x @ DICT_START..=DICT_END => v.visit_map(FixedMap(self, (x - DICT_START) as usize, false)),
             types::DICT => v.visit_map(TerminatedMap(self, false)),
 
-            58 => Err(de::Error::custom("unexpected strlen terminator")),
-            types::TERM => Err(de::Error::custom("unexpected seq/map terminator")),
-            x @ 45..=48 => Err(de::Error::custom(format!("unexpected unrecognized datatype indicator: {}", x))),
+            58 => Err(Error::custom("unexpected strlen terminator")),
+            types::TERM => Err(Error::custom("unexpected seq/map terminator")),
+            x @ 45..=48 => Err(Error::custom(format!("unexpected unrecognized datatype indicator: {}", x))),
         }
     }
 
@@ -144,10 +144,10 @@ impl<'de, 'a, R: Read> Deserializer<'de> for &'a mut RencodeDeserializer<R> {
 
 struct FixedSeq<'a, R: Read>(&'a mut RencodeDeserializer<R>, usize);
 
-impl<'de, 'a, R: Read> de::SeqAccess<'de> for FixedSeq<'a, R> {
+impl<'de, 'a, R: Read> SeqAccess<'de> for FixedSeq<'a, R> {
     type Error = Error;
 
-    fn next_element_seed<T: de::DeserializeSeed<'de>>(&mut self, seed: T) -> Result<Option<T::Value>> {
+    fn next_element_seed<T: DeserializeSeed<'de>>(&mut self, seed: T) -> Result<Option<T::Value>> {
         if self.1 == 0 {
             return Ok(None);
         }
@@ -158,13 +158,11 @@ impl<'de, 'a, R: Read> de::SeqAccess<'de> for FixedSeq<'a, R> {
 
 struct FixedMap<'a, R: Read>(&'a mut RencodeDeserializer<R>, usize, bool);
 
-impl<'de, 'a, R: Read> de::MapAccess<'de> for FixedMap<'a, R> {
+impl<'de, 'a, R: Read> MapAccess<'de> for FixedMap<'a, R> {
     type Error = Error;
 
-    fn next_key_seed<T: de::DeserializeSeed<'de>>(&mut self, seed: T) -> Result<Option<T::Value>> {
-        if self.2 {
-            panic!("tried to get a key inappropriately");
-        }
+    fn next_key_seed<T: DeserializeSeed<'de>>(&mut self, seed: T) -> Result<Option<T::Value>> {
+        assert!(!self.2, "inappropriate key access");
         if self.1 == 0 {
             return Ok(None);
         }
@@ -172,10 +170,8 @@ impl<'de, 'a, R: Read> de::MapAccess<'de> for FixedMap<'a, R> {
         seed.deserialize(&mut *self.0).map(Some)
     }
 
-    fn next_value_seed<T: de::DeserializeSeed<'de>>(&mut self, seed: T) -> Result<T::Value> {
-        if !self.2 {
-            panic!("tried to get a value inappropriately");
-        }
+    fn next_value_seed<T: DeserializeSeed<'de>>(&mut self, seed: T) -> Result<T::Value> {
+        assert!(self.2, "inappropriate value access");
         self.1 -= 1;
         self.2 = false;
         seed.deserialize(&mut *self.0)
@@ -184,12 +180,12 @@ impl<'de, 'a, R: Read> de::MapAccess<'de> for FixedMap<'a, R> {
 
 struct TerminatedSeq<'a, R: Read>(&'a mut RencodeDeserializer<R>);
 
-impl<'a, 'de: 'a, R: Read> de::SeqAccess<'de> for TerminatedSeq<'a, R> {
+impl<'a, 'de: 'a, R: Read> SeqAccess<'de> for TerminatedSeq<'a, R> {
     type Error = Error;
 
-    fn next_element_seed<T: de::DeserializeSeed<'de>>(&mut self, seed: T) -> Result<Option<T::Value>> {
+    fn next_element_seed<T: DeserializeSeed<'de>>(&mut self, seed: T) -> Result<Option<T::Value>> {
         match self.0.next_byte()? {
-            types::TERM => { return Ok(None); },
+            types::TERM => return Ok(None),
             n => self.0.go_back(n),
         }
         seed.deserialize(&mut *self.0).map(Some)
@@ -198,25 +194,21 @@ impl<'a, 'de: 'a, R: Read> de::SeqAccess<'de> for TerminatedSeq<'a, R> {
 
 struct TerminatedMap<'a, R: Read>(&'a mut RencodeDeserializer<R>, bool);
 
-impl<'a, 'de: 'a, R: Read> de::MapAccess<'de> for TerminatedMap<'a, R> {
+impl<'a, 'de: 'a, R: Read> MapAccess<'de> for TerminatedMap<'a, R> {
     type Error = Error;
 
-    fn next_key_seed<T: de::DeserializeSeed<'de>>(&mut self, seed: T) -> Result<Option<T::Value>> {
-        if self.1 {
-            panic!("tried to get a key inappropriately");
-        }
+    fn next_key_seed<T: DeserializeSeed<'de>>(&mut self, seed: T) -> Result<Option<T::Value>> {
+        assert!(!self.1, "inappropriate key access");
         match self.0.next_byte()? {
-            types::TERM => { return Ok(None); },
+            types::TERM => return Ok(None),
             n => self.0.go_back(n),
         }
         self.1 = true;
         seed.deserialize(&mut *self.0).map(Some)
     }
 
-    fn next_value_seed<T: de::DeserializeSeed<'de>>(&mut self, seed: T) -> Result<T::Value> {
-        if !self.1 {
-            panic!("tried to get a value inappropriately");
-        }
+    fn next_value_seed<T: DeserializeSeed<'de>>(&mut self, seed: T) -> Result<T::Value> {
+        assert!(self.1, "inappropriate value access");
         self.1 = false;
         seed.deserialize(&mut *self.0)
     }

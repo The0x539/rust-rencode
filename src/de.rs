@@ -129,11 +129,12 @@ impl<'de, 'a, R: Read> Deserializer<'de> for &'a mut RencodeDeserializer<R> {
     }
 
     fn deserialize_option<V: Visitor<'de>>(self, v: V) -> Result<V::Value> {
-        if self.next_byte()? == types::NONE {
-            v.visit_none()
-        } else {
-            self.go_back(types::NONE);
-            v.visit_some(self)
+        match self.next_byte()? {
+            types::NONE => v.visit_none(),
+            x => {
+                self.go_back(x);
+                v.visit_some(self)
+            }
         }
     }
 

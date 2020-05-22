@@ -42,79 +42,20 @@ impl<R: Read> RencodeDeserializer<R> {
         Ok(buf[0])
     }
 
-    fn go_back<T>(&mut self, n: u8) -> Option<T> {
+    fn go_back(&mut self, n: u8) {
         match self.returned_byte.replace(n) {
             None => (),
             Some(_) => unreachable!("we should never take more than 2 steps back"),
         }
-        None
     }
 
-    fn next_unit(&mut self) -> Result<Option<()>> {
-        let x = match self.next_byte()? {
-            types::NONE => Some(()),
-            n => self.go_back(n),
-        }; Ok(x)
-    }
-
-    fn next_bool(&mut self) -> Result<Option<bool>> {
-        let x = match self.next_byte()? {
-            types::TRUE => Some(true),
-            types::FALSE => Some(false),
-            n => self.go_back(n),
-        }; Ok(x)
-    }
-
-    fn next_i8(&mut self) -> Result<Option<i8>> {
-        let x = match self.next_byte()? {
-            types::INT1 => Some(self.read_i8()?),
-            n @ 0..=43 => Some(INT_POS_START + n as i8),
-            n @ 70..=101 => Some(70 - 1 - n as i8),
-            n => self.go_back(n),
-        }; Ok(x)
-    }
-
-    fn next_i16(&mut self) -> Result<Option<i16>> {
-        let x = match self.next_byte()? {
-            types::INT2 => Some(self.read_i16::<BE>()?),
-            n => self.go_back(n),
-        }; Ok(x)
-    }
-
-    fn next_i32(&mut self) -> Result<Option<i32>> {
-        let x = match self.next_byte()? {
-            types::INT4 => Some(self.read_i32::<BE>()?),
-            n => self.go_back(n),
-        }; Ok(x)
-    }
-
-    fn next_i64(&mut self) -> Result<Option<i64>> {
-        let x = match self.next_byte()? {
-            types::INT8 => Some(self.read_i64::<BE>()?),
-            n => self.go_back(n),
-        }; Ok(x)
-    }
-
-    fn next_f32(&mut self) -> Result<Option<f32>> {
-        let x = match self.next_byte()? {
-            types::FLOAT32 => Some(self.read_f32::<BE>()?),
-            n => self.go_back(n),
-        }; Ok(x)
-    }
-
-    fn next_f64(&mut self) -> Result<Option<f64>> {
-        let x = match self.next_byte()? {
-            types::FLOAT64 => Some(self.read_f64::<BE>()?),
-            n => self.go_back(n),
-        }; Ok(x)
-    }
-
-    fn next_bytes(&mut self) -> Result<Option<Vec<u8>>> {
-        let x = match self.next_byte()? {
+    fn next_bytes(&mut self, x: u8) -> Result<Vec<u8>> {
+        let len: usize = match x {
             n @ 49..=57 => {
                 let mut len_bytes = vec![n];
                 loop {
                     match self.next_byte()? {
+                        // Accept '0' as subsequent digits, but not as the intial digit.
                         n @ 48..=57 => len_bytes.push(n),
                         58 => break,
                         n => return Err(Error::custom(format!("Unexpected byte while parsing string length: {}", n))),
@@ -124,99 +65,70 @@ impl<R: Read> RencodeDeserializer<R> {
                 let len_str = std::str::from_utf8(&len_bytes).unwrap();
                 // Okay to unwrap because we know it's a decimal, and it's probably reasonably sized.
                 // TODO: return Err when it's unreasonably large.
-                let len: usize = len_str.parse().unwrap();
-                let mut buf = vec![0u8; len];
-                self.read_exact(&mut buf)?;
-                Some(buf)
+                len_str.parse().unwrap()
             },
-            n @ STR_START..=STR_END => {
-                let len = (n - STR_START) as usize;
-                let mut buf = vec![0u8; len];
-                self.read_exact(&mut buf)?;
-                Some(buf)
-            },
-            n => self.go_back(n),
-        }; Ok(x)
-    }
-
-    fn next_fixed_seq(&mut self) -> Result<Option<usize>> {
-        let x = match self.next_byte()? {
-            n @ LIST_START..=LIST_END => Some((n - LIST_START) as usize),
-            n => self.go_back(n),
-        }; Ok(x)
-    }
-
-    fn next_fixed_map(&mut self) -> Result<Option<usize>> {
-        let x = match self.next_byte()? {
-            n @ DICT_START..=DICT_END => Some((n - DICT_START) as usize),
-            n => self.go_back(n),
-        }; Ok(x)
-    }
-
-    fn next_terminated_seq(&mut self) -> Result<Option<()>> {
-        let x = match self.next_byte()? {
-            types::LIST => Some(()),
-            n => self.go_back(n),
-        }; Ok(x)
-    }
-
-    fn next_terminated_map(&mut self) -> Result<Option<()>> {
-        let x = match self.next_byte()? {
-            types::DICT => Some(()),
-            n => self.go_back(n),
-        }; Ok(x)
+            n @ STR_START..=STR_END => (n - STR_START) as usize,
+            // Okay to panic because this is a private function in a private struct.
+            // If this module is correct, this case will never happen.
+            _ => unreachable!("RencodeDeserializer::next_bytes should only be called with x in {}..={} or {}..={}.",
+                              49, 57,
+                              STR_START, STR_END),
+        };
+        let mut buf = vec![0u8; len];
+        self.read_exact(&mut buf)?;
+        Ok(buf)
     }
 }
 
 impl<'de, 'a, R: Read> Deserializer<'de> for &'a mut RencodeDeserializer<R> {
     type Error = Error;
 
-    fn deserialize_any<V: Visitor<'de>>(mut self, v: V) -> Result<V::Value> {
-        if let Some(()) = self.next_unit()? {
-            v.visit_unit()
-        } else if let Some(x) = self.next_bool()? {
-            v.visit_bool(x)
-        } else if let Some(x) = self.next_i8()? {
-            v.visit_i8(x)
-        } else if let Some(x) = self.next_i16()? {
-            v.visit_i16(x)
-        } else if let Some(x) = self.next_i32()? {
-            v.visit_i32(x)
-        } else if let Some(x) = self.next_i64()? {
-            v.visit_i64(x)
-        } else if let Some(x) = self.next_f32()? {
-            v.visit_f32(x)
-        } else if let Some(x) = self.next_f64()? {
-            v.visit_f64(x)
-        } else if let Some(x) = self.next_bytes()? {
-            match std::str::from_utf8(&x) {
-                Ok(s) => v.visit_string(s.to_string()),
-                Err(_) => v.visit_byte_buf(x),
+    fn deserialize_any<V: de::Visitor<'de>>(self, v: V) -> Result<V::Value> {
+        match self.next_byte()? {
+            types::NONE => v.visit_unit(),
+            types::TRUE => v.visit_bool(true),
+            types::FALSE => v.visit_bool(false),
+            types::INT1 => v.visit_i8(self.read_i8()?),
+            types::INT2 => v.visit_i16(self.read_i16::<BE>()?),
+            types::INT4 => v.visit_i32(self.read_i32::<BE>()?),
+            types::INT8 => v.visit_i64(self.read_i64::<BE>()?),
+            types::INT => unimplemented!("bigint deserialization is unsupported at the time of writing"),
+
+            types::FLOAT32 => v.visit_f32(self.read_f32::<BE>()?),
+            types::FLOAT64 => v.visit_f64(self.read_f64::<BE>()?),
+
+            x @ 0..=43 => v.visit_i8(INT_POS_START + x as i8),
+            x @ 70..=101 => v.visit_i8(70 - 1 - x as i8),
+
+            x @ STR_START..=STR_END | x @ 49..=57 => {
+                let byte_buf = self.next_bytes(x)?;
+                // If the string is valid UTF-8, treat it as a String.
+                // Otherwise, treat it as the Vec<u8> it is.
+                // Python went to so much trouble to use strongly typed Unicode strings,
+                // and rencode just goes and treats `bytes` and `str` the same. Ugh.
+                match std::str::from_utf8(&byte_buf) {
+                    Ok(s) => v.visit_string(s.to_string()),
+                    Err(_) => v.visit_byte_buf(byte_buf),
+                }
             }
-        } else if let Some(x) = self.next_fixed_seq()? {
-            v.visit_seq(FixedSeq(&mut self, x))
-        } else if let Some(x) = self.next_fixed_map()? {
-            v.visit_map(FixedMap(&mut self, x, false))
-        } else if let Some(()) = self.next_terminated_seq()? {
-            v.visit_seq(TerminatedSeq(&mut self))
-        } else if let Some(()) = self.next_terminated_map()? {
-            v.visit_map(TerminatedMap(&mut self, false))
-        } else {
-            let e = match self.next_byte()? {
-                types::INT => Error::custom("deserialization of bigints is unsupported at the time of writing"),
-                58 => Error::custom("unexpected strlen terminator"),
-                types::TERM => Error::custom("unexpected seq/map terminator"),
-                n @ 45..=48 => Error::custom(format!("unexpected unknown type indicator: {}", n)),
-                n => unreachable!("unexpectedly unhandled type indicator: {}", n),
-            };
-            Err(Error::custom(e))
+
+            x @ LIST_START..=LIST_END => v.visit_seq(FixedSeq(self, (x - LIST_START) as usize)),
+            types::LIST => v.visit_seq(TerminatedSeq(self)),
+
+            x @ DICT_START..=DICT_END => v.visit_map(FixedMap(self, (x - DICT_START) as usize, false)),
+            types::DICT => v.visit_map(TerminatedMap(self, false)),
+
+            58 => Err(de::Error::custom("unexpected strlen terminator")),
+            types::TERM => Err(de::Error::custom("unexpected seq/map terminator")),
+            x @ 45..=48 => Err(de::Error::custom(format!("unexpected unrecognized datatype indicator: {}", x))),
         }
     }
 
     fn deserialize_option<V: Visitor<'de>>(self, v: V) -> Result<V::Value> {
-        if let Some(()) = self.next_unit()? {
+        if self.next_byte()? == types::NONE {
             v.visit_none()
         } else {
+            self.go_back(types::NONE);
             v.visit_some(self)
         }
     }
@@ -276,7 +188,7 @@ impl<'a, 'de: 'a, R: Read> de::SeqAccess<'de> for TerminatedSeq<'a, R> {
     fn next_element_seed<T: de::DeserializeSeed<'de>>(&mut self, seed: T) -> Result<Option<T::Value>> {
         match self.0.next_byte()? {
             types::TERM => { return Ok(None); },
-            n => { self.0.go_back::<()>(n); },
+            n => self.0.go_back(n),
         }
         seed.deserialize(&mut *self.0).map(Some)
     }
@@ -293,7 +205,7 @@ impl<'a, 'de: 'a, R: Read> de::MapAccess<'de> for TerminatedMap<'a, R> {
         }
         match self.0.next_byte()? {
             types::TERM => { return Ok(None); },
-            n => { self.0.go_back::<()>(n); },
+            n => self.0.go_back(n),
         }
         self.1 = true;
         seed.deserialize(&mut *self.0).map(Some)

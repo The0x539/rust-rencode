@@ -37,18 +37,18 @@ pub const DICT_END: u8 = DICT_START - 1 + DICT_COUNT as u8;
 pub struct Error(String);
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        f.write_str(self.0.as_str())
     }
 }
 impl std::error::Error for Error {}
 impl serde::de::Error for Error {
     fn custom<T: std::fmt::Display>(msg: T) -> Self {
-        Self(format!("{}", msg))
+        Self(msg.to_string())
     }
 }
 impl serde::ser::Error for Error {
     fn custom<T: std::fmt::Display>(msg: T) -> Self {
-        Self(format!("{}", msg))
+        Self(msg.to_string())
     }
 }
 

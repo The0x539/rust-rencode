@@ -24,19 +24,21 @@ pub fn from_bytes<'de, T: Deserialize<'de>>(data: &'de [u8]) -> Result<T> {
 
 impl<R: Read> Read for RencodeDeserializer<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if buf.len() == 0 {
-            Ok(0)
-        } else if let Some(x) = self.returned_byte.take() {
-            buf[0] = x;
-            Ok(1)
-        } else {
-            self.data.read(buf)
-        }
+        // It wouldn't make sense for every call to go_back() not to directly precede a call to next_byte().
+        // If self.returned_byte isn't None, one of two things is the case.
+        // A: Something is wrong with this deserializer module's logic.
+        // B: Something is wrong with my understanding of its logic.
+        assert!(self.returned_byte.is_none());
+        self.data.read(buf)
     }
 }
 
 impl<R: Read> RencodeDeserializer<R> {
     fn next_byte(&mut self) -> Result<u8> {
+        if let Some(x) = self.returned_byte.take() {
+            return Ok(x);
+        }
+
         let mut buf = [0u8];
         self.read_exact(&mut buf)?;
         Ok(buf[0])

@@ -158,13 +158,6 @@ impl<'a, W: Write> ser::Serializer for &'a mut RencodeSerializer<W> {
         Ok(())
     }
 
-    fn serialize_u64(self, v: u64) -> Result<()> {
-        if v > std::i64::MAX as u64 {
-            return Err(Error::custom("unsigned integers are unsupported"));
-        }
-        self.serialize_i64(v as i64)
-    }
-    
     fn serialize_f32(self, v: f32) -> Result<()> {
         self.write_u8(types::FLOAT32);
         self.write_f32(v);
@@ -232,11 +225,43 @@ impl<'a, W: Write> ser::Serializer for &'a mut RencodeSerializer<W> {
         value.serialize(self)
     }
 
-    // Data types not supported by the real rencode
-    fn serialize_char(self, _: char) -> Result<()> { unimplemented!() }
-    fn serialize_u8(self, _: u8) -> Result<()> { unimplemented!() }
-    fn serialize_u16(self, _: u16) -> Result<()> { unimplemented!() }
-    fn serialize_u32(self, _: u32) -> Result<()> { unimplemented!() }
+    fn serialize_char(self, v: char) -> Result<()> {
+        self.serialize_str(&v.to_string()) // thanks, python
+    }
+
+    fn serialize_u8(self, v: u8) -> Result<()> {
+        if v <= i8::MAX as u8 {
+            self.serialize_i8(v as i8)
+        } else {
+            self.serialize_i16(v as i16)
+        }
+    }
+
+    fn serialize_u16(self, v: u16) -> Result<()> {
+        if v <= i16::MAX as u16 {
+            self.serialize_i16(v as i16)
+        } else {
+            self.serialize_i32(v as i32)
+        }
+    }
+
+    fn serialize_u32(self, v: u32) -> Result<()> {
+        if v <= i32::MAX as u32 {
+            self.serialize_i32(v as i32)
+        } else {
+            self.serialize_i64(v as i64)
+        }
+    }
+
+    fn serialize_u64(self, v: u64) -> Result<()> {
+        if v <= i64::MAX as u64 {
+            self.serialize_i64(v as i64)
+        } else {
+            let msg = format!("bigint serialization is NYI ({} > i64::MAX)", v);
+            Err(Error::custom(msg))
+        }
+    }
+    
     fn serialize_struct_variant(self, _: &str, _: u32, _: &str, _: usize) -> Nope { unimplemented!() }
     fn serialize_unit_struct(self, _: &str) -> Result<()> { unimplemented!() }
     fn serialize_unit_variant(self, _: &str, _: u32, _: &str) -> Result<()> { unimplemented!() }

@@ -53,30 +53,23 @@ impl<R: Read> RencodeDeserializer<R> {
 
     fn next_bytes(&mut self, x: u8) -> Result<Vec<u8>> {
         let len: usize = match x {
-            n @ 49..=57 => {
-                let mut len_bytes = Vec::with_capacity(usize::MAX.to_string().len());
-                len_bytes.push(n);
+            n @ b'0'..=b'9' => {
+                let mut len: usize = n as usize - 48;
                 loop {
                     match self.next_byte()? {
-                        // Accept '0' as subsequent digits, but not as the intial digit.
-                        n @ 48..=57 => len_bytes.push(n),
-                        58 => break,
+                        n @ b'0'..=b'9' => {
+                            len *= 10;
+                            len += n as usize - 48;
+                        }
+                        b':' => break len,
                         n => return Err(Error::custom(format!("Unexpected byte while parsing string length: {}", n))),
                     }
-                }
-                // Okay to unwrap because we know the only thing we put in there was ascii decimal digits
-                let len_str = std::str::from_utf8(&len_bytes).unwrap();
-                match len_str.parse() {
-                    Ok(len) => len,
-                    Err(e) => return Err(Error::custom(e)),
                 }
             },
             n @ STR_START..=STR_END => (n - STR_START) as usize,
             // Okay to panic because this is a private function in a private struct.
             // If this module is correct, this case will never happen.
-            _ => unreachable!("RencodeDeserializer::next_bytes should only be called with x in {}..={} or {}..={}.",
-                              49, 57,
-                              STR_START, STR_END),
+            _ => unreachable!("RencodeDeserializer::next_bytes should only be called with x in '0'..='9' or {}..={}.", STR_START, STR_END),
         };
         let mut buf = vec![0u8; len];
         self.read_exact(&mut buf)?;
@@ -104,7 +97,7 @@ impl<'de, 'a, R: Read> Deserializer<'de> for &'a mut RencodeDeserializer<R> {
             x @ 0..=43 => v.visit_i8(INT_POS_START + x as i8),
             x @ 70..=101 => v.visit_i8(70 - 1 - x as i8),
 
-            x @ STR_START..=STR_END | x @ 49..=57 => {
+            x @ STR_START..=STR_END | x @ b'0'..=b'9' => {
                 let byte_buf = self.next_bytes(x)?;
                 // If the string is valid UTF-8, treat it as a String.
                 // Otherwise, treat it as the Vec<u8> it is.
@@ -122,9 +115,9 @@ impl<'de, 'a, R: Read> Deserializer<'de> for &'a mut RencodeDeserializer<R> {
             x @ DICT_START..=DICT_END => v.visit_map(FixedMap(self, (x - DICT_START) as usize, false)),
             types::DICT => v.visit_map(TerminatedMap(self, false)),
 
-            58 => Err(Error::custom("unexpected strlen terminator")),
+            b':' => Err(Error::custom("unexpected strlen terminator")),
             types::TERM => Err(Error::custom("unexpected seq/map terminator")),
-            x @ 45..=48 => Err(Error::custom(format!("unexpected unrecognized datatype indicator: {}", x))),
+            x @ 45..=47 => Err(Error::custom(format!("unexpected unrecognized datatype indicator: {}", x))),
         }
     }
 

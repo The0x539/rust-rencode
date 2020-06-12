@@ -110,9 +110,9 @@ impl<'de, 'a, R: Read> Deserializer<'de> for &'a mut RencodeDeserializer<R> {
                 // Otherwise, treat it as the Vec<u8> it is.
                 // Python went to so much trouble to use strongly typed Unicode strings,
                 // and rencode just goes and treats `bytes` and `str` the same. Ugh.
-                match std::str::from_utf8(&byte_buf) {
-                    Ok(s) => v.visit_string(s.to_string()),
-                    Err(_) => v.visit_byte_buf(byte_buf),
+                match String::from_utf8(byte_buf) {
+                    Ok(s) => v.visit_string(s),
+                    Err(e) => v.visit_byte_buf(e.into_bytes()),
                 }
             }
 
